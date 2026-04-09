@@ -20,7 +20,7 @@ import {
   HR_DECAY_PERIOD_MS,
   HR_RECENT_THRESHOLD_MS,
 } from '../constants.js';
-import { getValidToken, loadTokens, saveTokens } from './token-store.js';
+import { getValidToken, loadTokens, saveTokens, forceRefresh } from './token-store.js';
 import { generateAuthUrl, startCallbackServer, exchangeCode } from './oauth.js';
 import * as cache from './cache.js';
 
@@ -39,7 +39,7 @@ export class DirectClient implements WhoopClient {
     return getValidToken(this.clientId, this.clientSecret);
   }
 
-  private async whoopFetch<T>(endpoint: string): Promise<T> {
+  private async whoopFetch<T>(endpoint: string, isRetry = false): Promise<T> {
     const token = await this.getToken();
     const response = await fetch(`${WHOOP_API_URL}${endpoint}`, {
       headers: {
@@ -48,11 +48,28 @@ export class DirectClient implements WhoopClient {
       },
     });
 
+    // FIX 7: Retry once with exponential backoff on 429
     if (response.status === 429) {
-      throw new Error('Rate limited by WHOOP API');
+      if (!isRetry) {
+        const retryAfter = parseInt(response.headers.get('retry-after') || '2', 10);
+        await new Promise(r => setTimeout(r, retryAfter * 1000));
+        return this.whoopFetch<T>(endpoint, true);
+      }
+      throw new Error('Rate limited by WHOOP API after retry');
     }
 
     if (response.status === 401) {
+      if (!isRetry) {
+        // Token expired between getValidToken check and the API call, or
+        // the stored token was stale. Force a refresh and retry once.
+        try {
+          await forceRefresh(this.clientId, this.clientSecret);
+          return this.whoopFetch<T>(endpoint, true);
+        } catch (refreshErr: any) {
+          // FIX 6: Log refresh failure instead of silently swallowing
+          console.error('[direct] Token refresh failed:', refreshErr.message);
+        }
+      }
       throw new Error('WHOOP_UNAUTHORIZED');
     }
 
@@ -60,9 +77,11 @@ export class DirectClient implements WhoopClient {
       throw new Error('WHOOP_SCOPE_MISSING');
     }
 
+    // FIX 4: Sanitize error — log full body to stderr, throw status only
     if (!response.ok) {
-      const error = await response.text();
-      throw new Error(`WHOOP API error: ${response.status} - ${error}`);
+      const errorBody = await response.text();
+      console.error(`[direct] WHOOP API error ${response.status}:`, errorBody);
+      throw new Error(`WHOOP API error: ${response.status}`);
     }
 
     return response.json() as Promise<T>;
@@ -346,10 +365,11 @@ export class DirectClient implements WhoopClient {
   }
 
   async authorize(): Promise<{ authUrl: string; waitForCallback: () => Promise<void> }> {
-    const authUrl = generateAuthUrl(this.clientId);
+    // FIX 2: Pass state through for CSRF validation
+    const { url: authUrl, state } = generateAuthUrl(this.clientId);
 
     const waitForCallback = async () => {
-      const code = await startCallbackServer();
+      const code = await startCallbackServer(state);
       const tokens = await exchangeCode(code, this.clientId, this.clientSecret);
       await saveTokens(tokens);
     };
@@ -358,7 +378,6 @@ export class DirectClient implements WhoopClient {
   }
 
   async checkHealth(): Promise<HealthReport> {
-    const tokens = await loadTokens();
     const endpoints: Record<string, string> = {
       recovery: '/v2/recovery?limit=1',
       cycle: '/v2/cycle?limit=1',
@@ -366,7 +385,11 @@ export class DirectClient implements WhoopClient {
       workout: '/v2/activity/workout?limit=1',
     };
 
-    if (!tokens) {
+    // Use getValidToken to ensure token is fresh (triggers refresh if needed)
+    let token: string;
+    try {
+      token = await this.getToken();
+    } catch {
       return {
         mode: 'direct',
         connected: false,
@@ -384,7 +407,7 @@ export class DirectClient implements WhoopClient {
         try {
           const response = await fetch(`${WHOOP_API_URL}${path}`, {
             headers: {
-              Authorization: `Bearer ${tokens.access_token}`,
+              Authorization: `Bearer ${token}`,
               'Content-Type': 'application/json',
             },
           });
@@ -396,7 +419,8 @@ export class DirectClient implements WhoopClient {
     );
 
     const allHealthy = Object.values(results).every((r) => r.ok);
-    const tokenExpiry = new Date(tokens.expires_at).toISOString();
+    const tokens = await loadTokens();
+    const tokenExpiry = tokens ? new Date(tokens.expires_at).toISOString() : undefined;
 
     return {
       mode: 'direct',

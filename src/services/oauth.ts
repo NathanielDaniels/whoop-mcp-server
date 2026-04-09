@@ -2,19 +2,22 @@ import { createServer } from 'node:http';
 import { WHOOP_AUTH_URL, WHOOP_TOKEN_URL, OAUTH_CALLBACK_PORT, OAUTH_CALLBACK_PATH, OAUTH_TIMEOUT_MS, ALL_SCOPES } from '../constants.js';
 import type { WhoopTokens } from '../types.js';
 
-export function generateAuthUrl(clientId: string): string {
+// FIX 2: Return state so it can be validated in callback
+export function generateAuthUrl(clientId: string): { url: string; state: string } {
+  const state = crypto.randomUUID();
   const redirectUri = `http://localhost:${OAUTH_CALLBACK_PORT}${OAUTH_CALLBACK_PATH}`;
   const params = new URLSearchParams({
     client_id: clientId,
     redirect_uri: redirectUri,
     response_type: 'code',
     scope: ALL_SCOPES.join(' '),
-    state: crypto.randomUUID(),
+    state,
   });
-  return `${WHOOP_AUTH_URL}?${params.toString()}`;
+  return { url: `${WHOOP_AUTH_URL}?${params.toString()}`, state };
 }
 
-export function startCallbackServer(): Promise<string> {
+// FIX 2: Validate state parameter to prevent CSRF
+export function startCallbackServer(expectedState: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const server = createServer((req, res) => {
       const url = new URL(req.url || '', `http://localhost:${OAUTH_CALLBACK_PORT}`);
@@ -22,6 +25,15 @@ export function startCallbackServer(): Promise<string> {
       if (url.pathname !== OAUTH_CALLBACK_PATH) {
         res.writeHead(404);
         res.end('Not found');
+        return;
+      }
+
+      const state = url.searchParams.get('state');
+      if (state !== expectedState) {
+        res.writeHead(400);
+        res.end('Invalid state parameter');
+        cleanup();
+        reject(new Error('OAuth state mismatch — possible CSRF'));
         return;
       }
 

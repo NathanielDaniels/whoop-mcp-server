@@ -1,4 +1,4 @@
-import { readFile, writeFile, mkdir, chmod } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, chmod, rename } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { WHOOP_MCP_DIR, TOKENS_FILE, TOKEN_REFRESH_BUFFER_MS, WHOOP_TOKEN_URL } from '../constants.js';
@@ -7,23 +7,33 @@ import type { WhoopTokens } from '../types.js';
 const DIR = join(homedir(), WHOOP_MCP_DIR);
 const FILE = join(DIR, TOKENS_FILE);
 
+// FIX 1: Mutex for concurrent refresh — only one in-flight refresh at a time
+let refreshInFlight: Promise<WhoopTokens> | null = null;
+
 async function ensureDirectory(): Promise<void> {
   await mkdir(DIR, { recursive: true, mode: 0o700 });
 }
 
+// FIX 10: Distinguish corrupt token file from missing file
 export async function loadTokens(): Promise<WhoopTokens | null> {
   try {
     const raw = await readFile(FILE, 'utf-8');
     return JSON.parse(raw) as WhoopTokens;
-  } catch {
+  } catch (err: any) {
+    if (err.code !== 'ENOENT') {
+      console.error('[token-store] Failed to read tokens file:', err.message);
+    }
     return null;
   }
 }
 
+// FIX 3: Atomic write via tmp+rename to prevent corruption on crash
 export async function saveTokens(tokens: WhoopTokens): Promise<void> {
   await ensureDirectory();
-  await writeFile(FILE, JSON.stringify(tokens, null, 2), 'utf-8');
-  await chmod(FILE, 0o600);
+  const tmp = `${FILE}.tmp`;
+  await writeFile(tmp, JSON.stringify(tokens, null, 2), 'utf-8');
+  await chmod(tmp, 0o600);
+  await rename(tmp, FILE);
 }
 
 export async function clearTokens(): Promise<void> {
@@ -85,8 +95,31 @@ export async function getValidToken(
     return tokens.access_token;
   }
 
-  // Refresh needed
-  const newTokens = await refreshAccessToken(tokens.refresh_token, clientId, clientSecret);
-  await saveTokens(newTokens);
-  return newTokens.access_token;
+  // FIX 1: Use mutex so concurrent callers share one refresh
+  if (!refreshInFlight) {
+    refreshInFlight = refreshAccessToken(tokens.refresh_token, clientId, clientSecret)
+      .then(async (t) => { await saveTokens(t); return t; })
+      .finally(() => { refreshInFlight = null; });
+  }
+  return (await refreshInFlight).access_token;
+}
+
+export async function forceRefresh(
+  clientId: string,
+  clientSecret: string,
+): Promise<string> {
+  const tokens = await loadTokens();
+  if (!tokens?.refresh_token) {
+    throw new Error(
+      'Not authenticated. Run the OAuth flow first: call whoop_check_health for instructions.',
+    );
+  }
+
+  // FIX 1: Use mutex so concurrent 401 retries share one refresh
+  if (!refreshInFlight) {
+    refreshInFlight = refreshAccessToken(tokens.refresh_token, clientId, clientSecret)
+      .then(async (t) => { await saveTokens(t); return t; })
+      .finally(() => { refreshInFlight = null; });
+  }
+  return (await refreshInFlight).access_token;
 }
