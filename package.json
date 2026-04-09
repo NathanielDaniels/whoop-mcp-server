@@ -1,0 +1,26 @@
+{
+  "name": "whoop-mcp-server",
+  "version": "1.0.0",
+  "description": "MCP server for WHOOP biometric data — remote mode (via deployed site) or direct mode (WHOOP API + local OAuth)",
+  "type": "module",
+  "bin": {
+    "whoop-mcp-server": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "axios": "^1.7.9",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "typescript": "^5.8.2"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}
