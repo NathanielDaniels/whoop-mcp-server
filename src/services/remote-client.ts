@@ -23,6 +23,10 @@ export class RemoteClient implements WhoopClient {
   constructor(baseUrl: string, cacheTtlMs = DEFAULT_CACHE_TTL_MS) {
     // Strip trailing slash
     this.baseUrl = baseUrl.replace(/\/+$/, '');
+    // FIX 8: Warn if remote URL uses HTTP (except localhost)
+    if (this.baseUrl.startsWith('http://') && !this.baseUrl.includes('localhost')) {
+      console.warn('[remote] WARNING: WHOOP_BASE_URL uses HTTP. Use HTTPS in production.');
+    }
     this.cacheTtlMs = cacheTtlMs;
   }
 

@@ -16,9 +16,10 @@ async function loadCache(): Promise<CacheData | null> {
   }
 }
 
+// FIX 5: Restrict cache file permissions — contains biometric data
 async function saveCache(data: CacheData): Promise<void> {
-  await mkdir(DIR, { recursive: true });
-  await writeFile(FILE, JSON.stringify(data, null, 2), 'utf-8');
+  await mkdir(DIR, { recursive: true, mode: 0o700 });
+  await writeFile(FILE, JSON.stringify(data, null, 2), { encoding: 'utf-8', mode: 0o600 });
 }
 
 export async function getCached(ttlMs = DEFAULT_CACHE_TTL_MS): Promise<WhoopStats | null> {
